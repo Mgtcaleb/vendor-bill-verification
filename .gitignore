@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.pdf
+*.xlsx
+*.xls
+*.csv
+mapping.json
+invoice_savings_output/

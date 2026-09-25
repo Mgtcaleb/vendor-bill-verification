@@ -1,0 +1,6 @@
+streamlit
+pandas
+pdfplumber
+sentence-transformers
+openpyxl
+xlrd
