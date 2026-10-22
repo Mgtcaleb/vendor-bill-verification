@@ -51,6 +51,31 @@ import re
 import sys
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Cloud safety: mock torchvision BEFORE importing sentence_transformers /
+# transformers. On Streamlit Cloud, torchvision is not installed; calling
+# importlib.util.find_spec("torchvision") inside transformers.__init__ raises
+# an exception that crashes the entire app at import time.
+# This guard must run here — before the sentence_transformers import below —
+# because Python resolves all top-level imports in a module before the
+# importing file (app.py) gets a chance to run its own mock.
+# ---------------------------------------------------------------------------
+if "torchvision" not in sys.modules:
+    try:
+        import torchvision  # noqa: F401
+    except (ImportError, Exception):
+        from unittest.mock import MagicMock
+        _tv_mock = MagicMock()
+        for _mod in (
+            "torchvision",
+            "torchvision.transforms",
+            "torchvision.transforms.v2",
+            "torchvision.transforms.v2.functional",
+            "torchvision.io",
+            "torchvision.ops",
+        ):
+            sys.modules[_mod] = _tv_mock
+
 import pandas as pd
 import pdfplumber
 from sentence_transformers import SentenceTransformer, util
