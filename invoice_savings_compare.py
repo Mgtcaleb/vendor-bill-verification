@@ -75,8 +75,8 @@ def get_ocr_model():
             _ocr_model = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
         except ImportError as e:
             raise ImportError(
-                "PaddleOCR or paddlepaddle is not installed. "
-                "Please run: pip install paddleocr paddlepaddle opencv-python-headless pillow"
+                "PaddleOCR / paddlepaddle is not installed or not available on Python 3.14. "
+                "To process invoice images on Streamlit Cloud, set your app's Python version to 3.11 or 3.12 under App Settings > Advanced Settings."
             ) from e
     return _ocr_model
 
