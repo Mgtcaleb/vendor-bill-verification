@@ -1,17 +1,4 @@
 import sys
-from unittest.mock import MagicMock
-
-# Cloud fallback: prevent transformers lazy-loader from failing if torchvision is uninstalled
-if "torchvision" not in sys.modules:
-    try:
-        import torchvision
-    except ImportError:
-        _mock = MagicMock()
-        sys.modules["torchvision"] = _mock
-        sys.modules["torchvision.transforms"] = _mock
-        sys.modules["torchvision.transforms.v2"] = _mock
-        sys.modules["torchvision.transforms.v2.functional"] = _mock
-        sys.modules["torchvision.io"] = _mock
 
 import streamlit as st
 import pandas as pd

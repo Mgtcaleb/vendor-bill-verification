@@ -51,43 +51,22 @@ import re
 import sys
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Cloud safety: mock torchvision BEFORE importing sentence_transformers /
-# transformers. On Streamlit Cloud, torchvision is not installed; calling
-# importlib.util.find_spec("torchvision") inside transformers.__init__ raises
-# an exception that crashes the entire app at import time.
-# This guard must run here — before the sentence_transformers import below —
-# because Python resolves all top-level imports in a module before the
-# importing file (app.py) gets a chance to run its own mock.
-# ---------------------------------------------------------------------------
-if "torchvision" not in sys.modules:
-    try:
-        import torchvision  # noqa: F401
-    except (ImportError, Exception):
-        from unittest.mock import MagicMock
-        _tv_mock = MagicMock()
-        for _mod in (
-            "torchvision",
-            "torchvision.transforms",
-            "torchvision.transforms.v2",
-            "torchvision.transforms.v2.functional",
-            "torchvision.io",
-            "torchvision.ops",
-        ):
-            sys.modules[_mod] = _tv_mock
-
 import pandas as pd
 import pdfplumber
-from sentence_transformers import SentenceTransformer, util
 
-# We will lazy-load the model to prevent the app from hanging on startup
+# sentence_transformers (and its transitive dep transformers) are imported
+# lazily inside get_embedding_model() so that transformers/__init__.py —
+# which calls importlib.util.find_spec("torchvision") at module load time —
+# is never executed during app startup on Streamlit Cloud.
 _embedding_model = None
 
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer  # lazy import
         _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     return _embedding_model
+
 
 _ocr_model = None
 
@@ -419,6 +398,7 @@ def match_items(
     """
     matched, needs_review, unmatched = [], [], []
     
+    from sentence_transformers import util  # lazy import — avoids transformers load at startup
     model = get_embedding_model()
     
     vendor_norms = vendor_df["norm_name"].tolist()
