@@ -4,7 +4,7 @@ pdfplumber
 sentence-transformers
 openpyxl
 xlrd
-paddlepaddle>=2.5.0
-paddleocr>=2.7.0
+paddlepaddle>=2.5.0; python_version < "3.14"
+paddleocr>=2.7.0; python_version < "3.14"
 opencv-python-headless
 pillow
