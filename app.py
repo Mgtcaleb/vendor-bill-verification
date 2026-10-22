@@ -1,3 +1,18 @@
+import sys
+from unittest.mock import MagicMock
+
+# Cloud fallback: prevent transformers lazy-loader from failing if torchvision is uninstalled
+if "torchvision" not in sys.modules:
+    try:
+        import torchvision
+    except ImportError:
+        _mock = MagicMock()
+        sys.modules["torchvision"] = _mock
+        sys.modules["torchvision.transforms"] = _mock
+        sys.modules["torchvision.transforms.v2"] = _mock
+        sys.modules["torchvision.transforms.v2.functional"] = _mock
+        sys.modules["torchvision.io"] = _mock
+
 import streamlit as st
 import pandas as pd
 import tempfile
@@ -16,7 +31,7 @@ from invoice_savings_compare import (
 st.set_page_config(page_title="Invoice Savings Compare", layout="wide")
 
 st.title("Invoice Savings Comparer & Analyzer")
-st.markdown("Upload your vendor invoices and vendor pricing sheet to see how much you are saving and whether you should buy.")
+st.markdown("Upload your vendor invoices (PDF or Images) and vendor pricing sheet to see how much you are saving and whether you should buy.")
 
 # Initialize session state for mapping and data
 if "mapping" not in st.session_state:
@@ -40,7 +55,11 @@ if "vendor_df" not in st.session_state:
 
 # Sidebar for file uploads
 st.sidebar.header("Upload Files")
-invoice_files = st.sidebar.file_uploader("Upload Invoice PDFs", type=["pdf"], accept_multiple_files=True)
+invoice_files = st.sidebar.file_uploader(
+    "Upload Invoices (PDF or Images)",
+    type=["pdf", "png", "jpg", "jpeg", "webp"],
+    accept_multiple_files=True
+)
 vendor_file = st.sidebar.file_uploader("Upload Vendor Sheet", type=["xlsx", "xls"])
 
 col_proc, col_clear = st.sidebar.columns(2)

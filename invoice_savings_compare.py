@@ -64,6 +64,22 @@ def get_embedding_model():
         _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     return _embedding_model
 
+_ocr_model = None
+
+def get_ocr_model():
+    """Lazy-load PaddleOCR engine to process invoice images on demand."""
+    global _ocr_model
+    if _ocr_model is None:
+        try:
+            from paddleocr import PaddleOCR
+            _ocr_model = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+        except ImportError as e:
+            raise ImportError(
+                "PaddleOCR or paddlepaddle is not installed. "
+                "Please run: pip install paddleocr paddlepaddle opencv-python-headless pillow"
+            ) from e
+    return _ocr_model
+
 # ----------------------------------------------------------------------
 # 1. INVOICE PARSING
 # ----------------------------------------------------------------------
@@ -153,28 +169,79 @@ def _clean_watermark_noise(line: str) -> str:
     return re.sub(r"\s{2,}", " ", line).strip()
 
 
-def parse_invoice(pdf_path: str) -> list[dict]:
-    """Extract line items from a Swaran Homoeopathic (Marg ERP) style invoice."""
-    with pdfplumber.open(pdf_path) as pdf:
-        full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+def extract_text_from_image(image_path: str) -> str:
+    """Extract and reconstruct horizontal lines from an invoice image using PaddleOCR."""
+    ocr = get_ocr_model()
+    result = ocr.ocr(str(image_path), cls=True)
+    if not result or not result[0]:
+        return ""
+    
+    ocr_lines = result[0]
+    items = []
+    for line_info in ocr_lines:
+        if not line_info or len(line_info) < 2:
+            continue
+        box, (text, conf) = line_info[0], line_info[1]
+        text = str(text).strip()
+        if not text:
+            continue
+        ys = [p[1] for p in box]
+        xs = [p[0] for p in box]
+        y_center = sum(ys) / len(ys)
+        x_min = min(xs)
+        height = max(ys) - min(ys)
+        items.append({"text": text, "y": y_center, "x": x_min, "h": height})
+    
+    if not items:
+        return ""
+    
+    # Sort detected boxes top to bottom
+    items.sort(key=lambda it: it["y"])
+    
+    lines = []
+    current_line = []
+    current_y = None
+    
+    for it in items:
+        thresh = max(12.0, it["h"] * 0.45)
+        if current_y is None or abs(it["y"] - current_y) <= thresh:
+            current_line.append(it)
+            current_y = sum(x["y"] for x in current_line) / len(current_line)
+        else:
+            current_line.sort(key=lambda x: x["x"])
+            lines.append(" ".join(x["text"] for x in current_line))
+            current_line = [it]
+            current_y = it["y"]
+            
+    if current_line:
+        current_line.sort(key=lambda x: x["x"])
+        lines.append(" ".join(x["text"] for x in current_line))
+        
+    return "\n".join(lines)
 
+
+def parse_invoice_text(full_text: str, source_name: str = "") -> list[dict]:
+    """Extract line items from formatted text (from PDF or PaddleOCR)."""
     items = []
     for raw_line in full_text.splitlines():
-        m = re.match(r"^\s*(\d+)\.\s+(.*)$", raw_line)
+        m = re.match(r"^\s*(\d+)[\.\)]?\s+(.*)$", raw_line)
         if not m:
             continue
         sno, rest = m.groups()
         rest = _clean_watermark_noise(rest)
 
+        # Normalize commas in decimals (e.g., 120,00 -> 120.00 from occasional OCR noise)
+        rest_normalized = re.sub(r"(\d+),(\d{2})\b", r"\1.\2", rest)
+
         # last 6 decimals on the line = MRP, Rate, DIS%, BatchDisc%, an
         # always-zero column (CST/unused on this invoice layout), NetAmount
-        decimals = list(re.finditer(r"\d+\.\d{2}", rest))
+        decimals = list(re.finditer(r"\d+\.\d{2}", rest_normalized))
         if len(decimals) < 6:
             continue  # not a genuine item line (e.g. a totals line)
         last6 = decimals[-6:]
         mrp, rate, dis_pct, batch_pct, _zero_col, net_amt = (float(x.group()) for x in last6)
 
-        head = rest[: last6[0].start()].strip()
+        head = rest_normalized[: last6[0].start()].strip()
 
         # qty is the first integer token in head
         qm = re.match(r"^(\d+)\s+(.*)$", head)
@@ -210,10 +277,37 @@ def parse_invoice(pdf_path: str) -> list[dict]:
                 "net_amount": net_amt,
                 "unit_net_price": unit_net_price,
                 "brand_tag": _extract_brand(description),
-                "source_invoice": Path(pdf_path).name,
+                "source_invoice": source_name,
             }
         )
     return items
+
+
+def parse_invoice(file_path: str) -> list[dict]:
+    """Extract line items from a Swaran Homoeopathic (Marg ERP) style invoice (PDF or Image)."""
+    path = Path(file_path)
+    image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
+
+    full_text = ""
+    if path.suffix.lower() in image_extensions:
+        full_text = extract_text_from_image(str(path))
+    elif path.suffix.lower() == ".pdf":
+        try:
+            with pdfplumber.open(str(path)) as pdf:
+                full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+        except Exception:
+            full_text = ""
+
+        # Fallback to PaddleOCR if the PDF contains scanned pages with no embedded text
+        if not full_text.strip():
+            try:
+                full_text = extract_text_from_image(str(path))
+            except Exception:
+                pass
+    else:
+        full_text = extract_text_from_image(str(path))
+
+    return parse_invoice_text(full_text, source_name=path.name)
 
 
 def _extract_brand(description: str) -> str | None:
