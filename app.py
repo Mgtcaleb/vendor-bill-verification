@@ -12,6 +12,7 @@ class _TorchvisionFinder(MetaPathFinder, Loader):
 
     def create_module(self, spec):
         mod = MagicMock()
+        mod.__version__ = "0.0.0"
         mod.__path__ = []
         mod.__file__ = "<mock>"
         return mod
@@ -21,6 +22,13 @@ class _TorchvisionFinder(MetaPathFinder, Loader):
 
 if not any(isinstance(f, _TorchvisionFinder) for f in sys.meta_path):
     sys.meta_path.insert(0, _TorchvisionFinder())
+
+try:
+    import transformers.utils.import_utils as _iu
+    _iu._torchvision_available = False
+except Exception:
+    pass
+
 
 import streamlit as st
 import pandas as pd
