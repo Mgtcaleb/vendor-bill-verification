@@ -70,8 +70,14 @@ _embedding_model = None
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
-        from sentence_transformers import SentenceTransformer  # lazy import
         token = os.environ.get("HF_TOKEN", HF_TOKEN)
+        if token:
+            try:
+                from huggingface_hub import login
+                login(token=token, add_to_git_credential=False)
+            except Exception:
+                pass
+        from sentence_transformers import SentenceTransformer  # lazy import
         if token:
             try:
                 _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", token=token)
