@@ -119,6 +119,8 @@ def get_ocr_model():
 # map to one canonical id.
 BRAND_ALIASES = {
     "SBL": "SBL",
+    "R/W": "RECKEWEG",
+    "R.W": "RECKEWEG",
     "RW": "RECKEWEG",
     "RECKEWEG": "RECKEWEG",
     "WSI": "SCHWABE",
