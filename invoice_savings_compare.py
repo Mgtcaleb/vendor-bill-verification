@@ -245,7 +245,7 @@ def extract_text_from_image(image_path: str) -> str:
 
 
 def parse_invoice_tables(pdf_path: str) -> list[dict]:
-    """Fallback: Extract line items from PDF tables (e.g. Purchase Orders)."""
+    """Extract line items from structured PDF tables (e.g. Great India / GST Invoices)."""
     items = []
     try:
         with pdfplumber.open(pdf_path) as pdf:
@@ -255,71 +255,81 @@ def parse_invoice_tables(pdf_path: str) -> list[dict]:
                     if not table or len(table) < 2:
                         continue
                     
-                    desc_col, qty_col, rate_col, amount_col = -1, -1, -1, -1
-                    header_row_idx = -1
+                    header_idx = -1
+                    sno_col, qty_col, pack_col, prod_col, mrp_col, rate_col, total_col = -1, -1, -1, -1, -1, -1, -1
                     
                     for r_idx, row in enumerate(table[:5]):
-                        row_strs = [str(c or "").lower().strip() for c in row]
+                        row_strs = [re.sub(r"[^a-z0-9]", "", str(c or "").lower()) for c in row]
                         for c_idx, cell in enumerate(row_strs):
-                            if any(k in cell for k in ["item", "product", "description", "particular", "name"]):
-                                desc_col = c_idx
-                            elif any(k in cell for k in ["qty", "quantity", "order qty"]):
+                            if cell in ["sno", "srno", "sn", "itemno"]:
+                                sno_col = c_idx
+                            elif cell in ["qty", "quantity", "orderqty"]:
                                 qty_col = c_idx
-                            elif any(k in cell for k in ["rate", "price", "mrp", "unit price", "cost"]):
+                            elif cell in ["pack", "packsize", "packing"]:
+                                pack_col = c_idx
+                            elif cell in ["product", "item", "description", "particulars", "particular", "itemname", "name"]:
+                                prod_col = c_idx
+                            elif cell in ["mrp"]:
+                                mrp_col = c_idx
+                            elif cell in ["rate", "price", "unitprice", "cost"]:
                                 rate_col = c_idx
-                            elif any(k in cell for k in ["amount", "total", "net"]):
-                                amount_col = c_idx
-                        if desc_col != -1 and (qty_col != -1 or rate_col != -1):
-                            header_row_idx = r_idx
+                            elif cell in ["totalamt", "total", "amount", "taxableamt", "netamt", "netamount"]:
+                                total_col = c_idx
+                        if prod_col != -1 and (qty_col != -1 or rate_col != -1):
+                            header_idx = r_idx
                             break
                     
-                    if header_row_idx == -1 or desc_col == -1:
+                    if header_idx == -1 or prod_col == -1:
                         continue
                         
-                    for row in table[header_row_idx + 1:]:
-                        if not row or desc_col >= len(row):
+                    for row in table[header_idx + 1:]:
+                        if not row or prod_col >= len(row):
                             continue
-                        desc = str(row[desc_col] or "").strip()
-                        if not desc or desc.lower() in ["total", "sub total", "grand total", "subtotal"]:
+                        desc = str(row[prod_col] or "").strip().replace("\n", " ")
+                        if not desc or desc.lower() in ["sub total", "total", "grand total", "round off", "igst", "cgst", "sgst", "subtotal"]:
                             continue
                             
                         qty = 1
                         if qty_col != -1 and qty_col < len(row):
-                            q_text = re.sub(r"[^\d\.]", "", str(row[qty_col] or ""))
-                            try:
-                                qty = int(float(q_text)) if q_text else 1
-                            except ValueError:
-                                qty = 1
+                            qm = re.search(r"\d+", str(row[qty_col] or ""))
+                            if qm:
+                                qty = int(qm.group(0))
                                 
+                        pack = ""
+                        if pack_col != -1 and pack_col < len(row):
+                            pack = str(row[pack_col] or "").strip().replace("\n", "")
+                            
                         rate = 0.0
                         if rate_col != -1 and rate_col < len(row):
-                            r_text = re.sub(r"[^\d\.]", "", str(row[rate_col] or ""))
-                            try:
-                                rate = float(r_text) if r_text else 0.0
-                            except ValueError:
-                                rate = 0.0
+                            rm = re.search(r"\d+(?:\.\d+)?", str(row[rate_col] or "").replace(",", ""))
+                            if rm:
+                                rate = float(rm.group(0))
                                 
-                        amount = rate * qty
-                        if amount_col != -1 and amount_col < len(row):
-                            a_text = re.sub(r"[^\d\.]", "", str(row[amount_col] or ""))
-                            try:
-                                amount = float(a_text) if a_text else amount
-                            except ValueError:
-                                pass
+                        mrp = rate
+                        if mrp_col != -1 and mrp_col < len(row):
+                            mm = re.search(r"\d+(?:\.\d+)?", str(row[mrp_col] or "").replace(",", ""))
+                            if mm:
+                                mrp = float(mm.group(0))
                                 
-                        if amount <= 0 and rate <= 0:
+                        total = rate * qty
+                        if total_col != -1 and total_col < len(row):
+                            tm = re.search(r"\d+(?:\.\d+)?", str(row[total_col] or "").replace(",", ""))
+                            if tm:
+                                total = float(tm.group(0))
+                                
+                        if total <= 0 and rate <= 0:
                             continue
                             
-                        unit_net_price = round(amount / qty, 4) if qty else rate
+                        unit_net_price = round(total / qty, 4) if qty else rate
                         items.append({
                             "sno": len(items) + 1,
                             "qty": qty,
-                            "pack": "",
+                            "pack": pack,
                             "description": desc,
-                            "mrp": rate,
+                            "mrp": mrp,
                             "rate": rate,
                             "discount_pct": 0.0,
-                            "net_amount": amount,
+                            "net_amount": total,
                             "unit_net_price": unit_net_price,
                             "brand_tag": _extract_brand(desc),
                             "source_invoice": Path(pdf_path).name,
@@ -429,10 +439,17 @@ def parse_invoice_text(full_text: str, source_name: str = "") -> list[dict]:
 
 
 def parse_invoice(file_path: str) -> list[dict]:
-    """Extract line items from a Swaran Homoeopathic (Marg ERP) style invoice (PDF or Image)."""
+    """Extract line items from invoice (PDF or Image), prioritizing structured tables."""
     path = Path(file_path)
     image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
 
+    # 1. For PDF files, always try structured table extraction first
+    if path.suffix.lower() == ".pdf":
+        items = parse_invoice_tables(str(path))
+        if items:
+            return items
+
+    # 2. Extract text from PDF or Image
     full_text = ""
     if path.suffix.lower() in image_extensions:
         full_text = extract_text_from_image(str(path))
@@ -452,10 +469,10 @@ def parse_invoice(file_path: str) -> list[dict]:
     else:
         full_text = extract_text_from_image(str(path))
 
-    # 1. Parse text lines
+    # 3. Parse text lines
     items = parse_invoice_text(full_text, source_name=path.name)
     
-    # 2. If 0 items from text and it's a PDF, fallback to tabular parsing
+    # 4. If text parsing produced nothing and it's a PDF, try table parsing as last resort
     if not items and path.suffix.lower() == ".pdf":
         items = parse_invoice_tables(str(path))
 
@@ -505,36 +522,41 @@ def _normalize_name(name: str) -> str:
 
 def load_vendor_sheet(path: str) -> pd.DataFrame:
     engine = "xlrd" if str(path).lower().endswith(".xls") else "openpyxl"
-    df = pd.read_excel(path, engine=engine)
+    raw_df = pd.read_excel(path, engine=engine)
     
     # Strip whitespace from column names
-    df.columns = [str(c).strip() for c in df.columns]
+    raw_df.columns = [str(c).strip() for c in raw_df.columns]
 
-    # Map common column aliases flexibly
-    col_map = {}
-    for c in df.columns:
-        c_norm = re.sub(r"[^a-zA-Z0-9]", "", c.lower())
-        if c_norm in {"productname", "product", "itemname", "item", "description", "items"}:
-            col_map[c] = "Product Name"
-        elif c_norm in {"orderquantity", "orderqty", "quantity", "qty", "units", "orderedqty"}:
-            col_map[c] = "Order Quantity"
-        elif c_norm in {"transferprice", "price", "unitprice", "rate", "tp", "ourprice"}:
-            col_map[c] = "Transfer Price"
-        elif c_norm in {"transferpriceorderqty", "totalprice", "totalamount", "amount", "total"}:
-            col_map[c] = "Transfer Price*Order QTY"
+    df = pd.DataFrame()
+    required = ["Product Name", "Order Quantity", "Transfer Price", "Transfer Price*Order QTY"]
 
-    df = df.rename(columns=col_map)
+    for req in required:
+        matching_cols = [c for c in raw_df.columns if str(c).strip().lower() == req.lower()]
+        if not matching_cols:
+            for c in raw_df.columns:
+                cn = re.sub(r"[^a-z0-9]", "", str(c).lower())
+                if req == "Product Name" and cn in ["productname", "product", "itemname", "item", "description", "particulars", "name"]:
+                    matching_cols.append(c)
+                elif req == "Order Quantity" and cn in ["orderquantity", "orderqty", "quantity", "qty", "units"]:
+                    matching_cols.append(c)
+                elif req == "Transfer Price" and cn in ["transferprice", "price", "unitprice", "rate", "tp"]:
+                    matching_cols.append(c)
+                elif req == "Transfer Price*Order QTY" and cn in ["transferpriceorderqty", "totalprice", "totalamount", "amount", "total"]:
+                    matching_cols.append(c)
+        if matching_cols:
+            # Pick column that has the most non-null values to avoid empty duplicate columns
+            best_col = max(matching_cols, key=lambda c: raw_df[c].notna().sum())
+            df[req] = raw_df[best_col]
 
-    # If Total Price column is missing but we have Qty and Price, compute it automatically
+    # If Total Price is missing, compute it
     if "Transfer Price*Order QTY" not in df.columns and "Transfer Price" in df.columns and "Order Quantity" in df.columns:
         df["Transfer Price*Order QTY"] = pd.to_numeric(df["Transfer Price"], errors="coerce") * pd.to_numeric(df["Order Quantity"], errors="coerce")
 
-    required = ["Product Name", "Order Quantity", "Transfer Price", "Transfer Price*Order QTY"]
     missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(
             f"Vendor sheet is missing expected column(s): {missing}. "
-            f"Found columns: {list(df.columns)}"
+            f"Found columns: {list(raw_df.columns)}"
         )
     df = df.dropna(subset=["Product Name"]).copy()
     df["norm_name"] = df["Product Name"].apply(_normalize_name)
