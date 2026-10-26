@@ -45,11 +45,18 @@ You can skip the dialogs and script it directly instead:
 
 from __future__ import annotations
 
+import os
 import argparse
 import json
 import re
 import sys
 from pathlib import Path
+
+import warnings
+warnings.filterwarnings("ignore", message=".*unauthenticated requests to the HF Hub.*")
+
+# Configure Hugging Face Token for authenticated Hub requests if provided in environment/secrets
+HF_TOKEN = os.environ.get("HF_TOKEN")
 
 import pandas as pd
 import pdfplumber
@@ -64,7 +71,14 @@ def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
         from sentence_transformers import SentenceTransformer  # lazy import
-        _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        token = os.environ.get("HF_TOKEN", HF_TOKEN)
+        if token:
+            try:
+                _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", token=token)
+            except Exception:
+                _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        else:
+            _embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     return _embedding_model
 
 

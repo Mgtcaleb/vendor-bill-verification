@@ -7,6 +7,14 @@ import os
 import json
 from pathlib import Path
 
+# Set Hugging Face Token for authenticated Hub requests if defined in Streamlit secrets
+if "HF_TOKEN" not in os.environ:
+    try:
+        if hasattr(st, "secrets") and "HF_TOKEN" in st.secrets:
+            os.environ["HF_TOKEN"] = str(st.secrets["HF_TOKEN"])
+    except Exception:
+        pass
+
 # Import core logic from the existing script
 from invoice_savings_compare import (
     parse_invoice,
