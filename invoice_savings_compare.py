@@ -244,27 +244,114 @@ def extract_text_from_image(image_path: str) -> str:
     return "\n".join(lines)
 
 
+def parse_invoice_tables(pdf_path: str) -> list[dict]:
+    """Fallback: Extract line items from PDF tables (e.g. Purchase Orders)."""
+    items = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                tables = page.extract_tables() or []
+                for table in tables:
+                    if not table or len(table) < 2:
+                        continue
+                    
+                    desc_col, qty_col, rate_col, amount_col = -1, -1, -1, -1
+                    header_row_idx = -1
+                    
+                    for r_idx, row in enumerate(table[:5]):
+                        row_strs = [str(c or "").lower().strip() for c in row]
+                        for c_idx, cell in enumerate(row_strs):
+                            if any(k in cell for k in ["item", "product", "description", "particular", "name"]):
+                                desc_col = c_idx
+                            elif any(k in cell for k in ["qty", "quantity", "order qty"]):
+                                qty_col = c_idx
+                            elif any(k in cell for k in ["rate", "price", "mrp", "unit price", "cost"]):
+                                rate_col = c_idx
+                            elif any(k in cell for k in ["amount", "total", "net"]):
+                                amount_col = c_idx
+                        if desc_col != -1 and (qty_col != -1 or rate_col != -1):
+                            header_row_idx = r_idx
+                            break
+                    
+                    if header_row_idx == -1 or desc_col == -1:
+                        continue
+                        
+                    for row in table[header_row_idx + 1:]:
+                        if not row or desc_col >= len(row):
+                            continue
+                        desc = str(row[desc_col] or "").strip()
+                        if not desc or desc.lower() in ["total", "sub total", "grand total", "subtotal"]:
+                            continue
+                            
+                        qty = 1
+                        if qty_col != -1 and qty_col < len(row):
+                            q_text = re.sub(r"[^\d\.]", "", str(row[qty_col] or ""))
+                            try:
+                                qty = int(float(q_text)) if q_text else 1
+                            except ValueError:
+                                qty = 1
+                                
+                        rate = 0.0
+                        if rate_col != -1 and rate_col < len(row):
+                            r_text = re.sub(r"[^\d\.]", "", str(row[rate_col] or ""))
+                            try:
+                                rate = float(r_text) if r_text else 0.0
+                            except ValueError:
+                                rate = 0.0
+                                
+                        amount = rate * qty
+                        if amount_col != -1 and amount_col < len(row):
+                            a_text = re.sub(r"[^\d\.]", "", str(row[amount_col] or ""))
+                            try:
+                                amount = float(a_text) if a_text else amount
+                            except ValueError:
+                                pass
+                                
+                        if amount <= 0 and rate <= 0:
+                            continue
+                            
+                        unit_net_price = round(amount / qty, 4) if qty else rate
+                        items.append({
+                            "sno": len(items) + 1,
+                            "qty": qty,
+                            "pack": "",
+                            "description": desc,
+                            "mrp": rate,
+                            "rate": rate,
+                            "discount_pct": 0.0,
+                            "net_amount": amount,
+                            "unit_net_price": unit_net_price,
+                            "brand_tag": _extract_brand(desc),
+                            "source_invoice": Path(pdf_path).name,
+                        })
+    except Exception:
+        pass
+    return items
+
+
 def parse_invoice_text(full_text: str, source_name: str = "") -> list[dict]:
     """Extract line items from formatted text (from PDF or PaddleOCR)."""
     items = []
     lines = full_text.splitlines()
     for idx, raw_line in enumerate(lines):
-        m = re.match(r"^\s*(\d+)[\.\)]?\s+(.*)$", raw_line)
+        raw_line_clean = raw_line.strip()
+        if not raw_line_clean:
+            continue
+
+        m = re.match(r"^\s*(\d+)[\.\)]?\s+(.*)$", raw_line_clean)
         if m:
             sno, rest = m.groups()
         else:
             sno = str(idx + 1)
-            rest = raw_line.strip()
+            rest = raw_line_clean
 
         rest = _clean_watermark_noise(rest)
-
-        # Normalize commas in decimals (e.g., 120,00 -> 120.00 from occasional OCR noise)
         rest_normalized = re.sub(r"(\d+),(\d{2})\b", r"\1.\2", rest)
 
         # decimals on the line: MRP, Rate, DIS%, CST/Batch%, NetAmount
         decimals = list(re.finditer(r"\d+\.\d{2}", rest_normalized))
-        if len(decimals) < 4:
-            continue  # not an item line with prices
+        if len(decimals) < 2:
+            continue  # Needs at least 2 price/amount decimals
 
         if len(decimals) >= 6:
             last_decimals = decimals[-6:]
@@ -272,18 +359,38 @@ def parse_invoice_text(full_text: str, source_name: str = "") -> list[dict]:
         elif len(decimals) == 5:
             last_decimals = decimals[-5:]
             mrp, rate, dis_pct, _, net_amt = (float(x.group()) for x in last_decimals)
-        else:
+        elif len(decimals) == 4:
             last_decimals = decimals[-4:]
             mrp, rate, dis_pct, net_amt = (float(x.group()) for x in last_decimals)
+        elif len(decimals) == 3:
+            last_decimals = decimals[-3:]
+            mrp, rate, net_amt = (float(x.group()) for x in last_decimals)
+            dis_pct = 0.0
+        else:
+            last_decimals = decimals[-2:]
+            rate, net_amt = (float(x.group()) for x in last_decimals)
+            mrp = rate
+            dis_pct = 0.0
 
         head = rest_normalized[: last_decimals[0].start()].strip()
-
-        # qty is the first integer token in head
-        qm = re.match(r"^(\d+)\s+(.*)$", head)
-        if not qm:
+        if not head:
             continue
-        qty = int(qm.group(1))
-        head = qm.group(2)
+
+        # Extract qty: either at start ("10 ECHINACEA"), at end ("ECHINACEA 10"), or inferred from net/rate
+        qty = 1
+        qm_start = re.match(r"^(\d+)\s+(.*)$", head)
+        qm_end = re.search(r"^(.*?)\s+(\d+)\s*$", head)
+
+        if qm_start and int(qm_start.group(1)) > 0:
+            qty = int(qm_start.group(1))
+            head = qm_start.group(2)
+        elif qm_end and int(qm_end.group(2)) > 0:
+            qty = int(qm_end.group(2))
+            head = qm_end.group(1)
+        elif rate > 0 and net_amt > 0:
+            calc_q = round(net_amt / rate)
+            if 0 < calc_q < 10000:
+                qty = int(calc_q)
 
         # strip trailing HSN code (6-8 digit run) at the end of head
         head = re.sub(r"\s*\d{6,8}\s*$", "", head).strip()
@@ -298,7 +405,7 @@ def parse_invoice_text(full_text: str, source_name: str = "") -> list[dict]:
             pack = ""
             description = head.strip()
 
-        if not description:
+        if len(description) < 2 or description.lower() in ["total", "sub total", "subtotal", "amount", "taxable"]:
             continue
 
         unit_net_price = round(net_amt / qty, 4) if qty else net_amt
@@ -345,7 +452,14 @@ def parse_invoice(file_path: str) -> list[dict]:
     else:
         full_text = extract_text_from_image(str(path))
 
-    return parse_invoice_text(full_text, source_name=path.name)
+    # 1. Parse text lines
+    items = parse_invoice_text(full_text, source_name=path.name)
+    
+    # 2. If 0 items from text and it's a PDF, fallback to tabular parsing
+    if not items and path.suffix.lower() == ".pdf":
+        items = parse_invoice_tables(str(path))
+
+    return items
 
 
 def _extract_brand(description: str) -> str | None:

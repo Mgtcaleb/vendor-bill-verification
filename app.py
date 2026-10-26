@@ -128,7 +128,17 @@ if sidebar_proc_btn or main_proc_btn:
                         debug_info[inv_file.name] = len(invoice_items)
                         
                         if len(invoice_items) == 0:
-                            st.warning(f"⚠️ No line items could be parsed from `{inv_file.name}`. Please check if this invoice is in standard Marg ERP layout.")
+                            st.warning(f"⚠️ No line items could be parsed from `{inv_file.name}`.")
+                            try:
+                                with pdfplumber.open(inv_path) as pdf:
+                                    sample_text = "\n".join(page.extract_text() or "" for page in pdf.pages[:2])
+                                    if sample_text.strip():
+                                        with st.expander(f"🔍 View extracted text from `{inv_file.name}`"):
+                                            st.code(sample_text[:2500])
+                                    else:
+                                        st.info(f"ℹ️ `{inv_file.name}` appears to be a scanned image PDF without embedded text.")
+                            except Exception:
+                                pass
                         else:
                             st.success(f"✅ Parsed {len(invoice_items)} line items from `{inv_file.name}`.")
                     except Exception as e:
