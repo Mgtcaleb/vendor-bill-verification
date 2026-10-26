@@ -1,7 +1,30 @@
 import sys
+from importlib.abc import MetaPathFinder, Loader
+from importlib.machinery import ModuleSpec
+from unittest.mock import MagicMock
+
+# Intercept and mock torchvision imports so transformers/streamlit watcher never fails with ModuleNotFoundError
+class _TorchvisionFinder(MetaPathFinder, Loader):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "torchvision" or fullname.startswith("torchvision."):
+            return ModuleSpec(fullname, self, is_package=True)
+        return None
+
+    def create_module(self, spec):
+        mod = MagicMock()
+        mod.__path__ = []
+        mod.__file__ = "<mock>"
+        return mod
+
+    def exec_module(self, module):
+        pass
+
+if not any(isinstance(f, _TorchvisionFinder) for f in sys.meta_path):
+    sys.meta_path.insert(0, _TorchvisionFinder())
 
 import streamlit as st
 import pandas as pd
+import pdfplumber
 import tempfile
 import os
 import json
@@ -199,8 +222,15 @@ if st.session_state.get("has_run"):
     else:
         st.info("Neutral Savings. Cost is exactly matching the vendor sheet.")
 
-    tabs = st.tabs(["Matched Items (" + str(len(st.session_state["matched"])) + ")", 
-                    "Unmatched (" + str(len(st.session_state["unmatched"])) + ")"])
+    matched_count = len(st.session_state["matched"])
+    review_count = len(st.session_state.get("needs_review", []))
+    unmatched_count = len(st.session_state["unmatched"])
+
+    tabs = st.tabs([
+        f"Matched Items ({matched_count})",
+        f"Needs Review ({review_count})",
+        f"Unmatched ({unmatched_count})"
+    ])
     
     with tabs[0]:
         st.subheader("Confirmed Matched Items")
@@ -217,8 +247,17 @@ if st.session_state.get("has_run"):
             )
         else:
             st.info("No matched items yet.")
-            
+
     with tabs[1]:
+        st.subheader("Items Needing Review / Low Confidence Matches")
+        if st.session_state.get("needs_review"):
+            df_review = pd.DataFrame(st.session_state["needs_review"])
+            st.dataframe(df_review, use_container_width=True)
+            st.info("These items had candidate matches below the automatic confidence threshold.")
+        else:
+            st.info("No items requiring review.")
+            
+    with tabs[2]:
         st.subheader("Unmatched Items")
         if st.session_state["unmatched"]:
             df_unmatched = pd.DataFrame(st.session_state["unmatched"])

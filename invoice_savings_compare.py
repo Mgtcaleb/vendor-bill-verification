@@ -51,6 +51,29 @@ import json
 import re
 import sys
 from pathlib import Path
+from importlib.abc import MetaPathFinder, Loader
+from importlib.machinery import ModuleSpec
+from unittest.mock import MagicMock
+
+# Intercept and mock torchvision imports so transformers/streamlit watcher never fails with ModuleNotFoundError
+class _TorchvisionFinder(MetaPathFinder, Loader):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "torchvision" or fullname.startswith("torchvision."):
+            return ModuleSpec(fullname, self, is_package=True)
+        return None
+
+    def create_module(self, spec):
+        mod = MagicMock()
+        mod.__path__ = []
+        mod.__file__ = "<mock>"
+        return mod
+
+    def exec_module(self, module):
+        pass
+
+if not any(isinstance(f, _TorchvisionFinder) for f in sys.meta_path):
+    sys.meta_path.insert(0, _TorchvisionFinder())
+
 
 import warnings
 warnings.filterwarnings("ignore", message=".*unauthenticated requests to the HF Hub.*")
@@ -263,19 +286,22 @@ def parse_invoice_tables(pdf_path: str) -> list[dict]:
                     for r_idx, row in enumerate(table[:5]):
                         row_strs = [re.sub(r"[^a-z0-9]", "", str(c or "").lower()) for c in row]
                         for c_idx, cell in enumerate(row_strs):
-                            if cell in ["sno", "srno", "sn", "itemno"]:
+                            # Skip tax columns
+                            if any(tax in cell for tax in ["cgst", "sgst", "igst", "gst", "cess", "taxamt", "taxrate"]):
+                                continue
+                            if any(k in cell for k in ["sno", "srno", "itemno"]) or cell in ["sn", "slno"]:
                                 sno_col = c_idx
-                            elif cell in ["qty", "quantity", "orderqty"]:
+                            elif any(k in cell for k in ["qty", "quantity", "orderqty", "billedqty"]):
                                 qty_col = c_idx
-                            elif cell in ["pack", "packsize", "packing"]:
+                            elif any(k in cell for k in ["pack", "packsize", "packing", "pkg"]):
                                 pack_col = c_idx
-                            elif cell in ["product", "item", "description", "particulars", "particular", "itemname", "name"]:
+                            elif any(k in cell for k in ["product", "item", "description", "particular", "goods", "name"]):
                                 prod_col = c_idx
-                            elif cell in ["mrp"]:
+                            elif "mrp" in cell:
                                 mrp_col = c_idx
-                            elif cell in ["rate", "price", "unitprice", "cost"]:
+                            elif any(k in cell for k in ["rate", "unitprice", "cost", "unitrate"]) or cell == "price":
                                 rate_col = c_idx
-                            elif cell in ["totalamt", "total", "amount", "taxableamt", "netamt", "netamount"]:
+                            elif any(k in cell for k in ["total", "amount", "taxable", "netamt", "netamount", "value"]):
                                 total_col = c_idx
                         if prod_col != -1 and (qty_col != -1 or rate_col != -1):
                             header_idx = r_idx
