@@ -2,6 +2,7 @@ streamlit
 pandas
 pdfplumber
 sentence-transformers
+torchvision
 openpyxl
 xlrd
 paddlepaddle>=2.5.0; python_version < "3.14"

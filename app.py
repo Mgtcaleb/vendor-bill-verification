@@ -25,6 +25,12 @@ from invoice_savings_compare import (
     _build_match
 )
 
+def show_df(df):
+    try:
+        st.dataframe(df, width="stretch")
+    except TypeError:
+        st.dataframe(df, use_container_width=True)
+
 st.set_page_config(page_title="Invoice Savings Compare", layout="wide")
 
 st.title("Invoice Savings Comparer & Analyzer")
@@ -213,7 +219,7 @@ if st.session_state.get("has_run"):
         st.subheader("Confirmed Matched Items")
         if st.session_state["matched"]:
             df_matched = pd.DataFrame(st.session_state["matched"])
-            st.dataframe(df_matched, use_container_width=True)
+            show_df(df_matched)
             
             csv = df_matched.to_csv(index=False).encode('utf-8')
             st.download_button(
@@ -229,7 +235,15 @@ if st.session_state.get("has_run"):
         st.subheader("Items Needing Review / Low Confidence Matches")
         if st.session_state.get("needs_review"):
             df_review = pd.DataFrame(st.session_state["needs_review"])
-            st.dataframe(df_review, use_container_width=True)
+            show_df(df_review)
+            
+            csv_review = df_review.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Needs Review Items as CSV",
+                data=csv_review,
+                file_name='needs_review.csv',
+                mime='text/csv',
+            )
             st.info("These items had candidate matches below the automatic confidence threshold.")
         else:
             st.info("No items requiring review.")
@@ -238,7 +252,7 @@ if st.session_state.get("has_run"):
         st.subheader("Unmatched Items")
         if st.session_state["unmatched"]:
             df_unmatched = pd.DataFrame(st.session_state["unmatched"])
-            st.dataframe(df_unmatched, use_container_width=True)
+            show_df(df_unmatched)
             
             csv = df_unmatched.to_csv(index=False).encode('utf-8')
             st.download_button(

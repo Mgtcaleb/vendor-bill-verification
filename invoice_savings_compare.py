@@ -326,6 +326,10 @@ def parse_invoice_tables(pdf_path: str) -> list[dict]:
                             continue
                             
                         unit_net_price = round(total / qty, 4) if qty else rate
+                        if rate <= 0 and unit_net_price > 0:
+                            rate = unit_net_price
+                        if mrp <= 0:
+                            mrp = rate
                         items.append({
                             "sno": len(items) + 1,
                             "qty": qty,
@@ -521,6 +525,26 @@ def _normalize_name(name: str) -> str:
     return s
 
 
+def _clean_float(val, default: float = 0.0) -> float:
+    if val is None or pd.isna(val):
+        return default
+    try:
+        s = str(val).replace("₹", "").replace("$", "").replace(",", "").strip()
+        return float(s)
+    except (ValueError, TypeError):
+        return default
+
+
+def _clean_int(val, default: int = 1) -> int:
+    if val is None or pd.isna(val):
+        return default
+    try:
+        f = _clean_float(val, float(default))
+        return int(round(f))
+    except (ValueError, TypeError):
+        return default
+
+
 # ----------------------------------------------------------------------
 # 2. VENDOR SHEET LOADING
 # ----------------------------------------------------------------------
@@ -529,8 +553,18 @@ def load_vendor_sheet(path: str) -> pd.DataFrame:
     engine = "xlrd" if str(path).lower().endswith(".xls") else "openpyxl"
     raw_df = pd.read_excel(path, engine=engine)
     
-    # Strip whitespace from column names
-    raw_df.columns = [str(c).strip() for c in raw_df.columns]
+    # Strip whitespace and deduplicate column names
+    cols = []
+    count = {}
+    for col in raw_df.columns:
+        c_str = str(col).strip()
+        if c_str in count:
+            count[c_str] += 1
+            cols.append(f"{c_str}_{count[c_str]}")
+        else:
+            count[c_str] = 0
+            cols.append(c_str)
+    raw_df.columns = cols
 
     df = pd.DataFrame()
     required = ["Product Name", "Order Quantity", "Transfer Price", "Transfer Price*Order QTY"]
@@ -540,22 +574,31 @@ def load_vendor_sheet(path: str) -> pd.DataFrame:
         if not matching_cols:
             for c in raw_df.columns:
                 cn = re.sub(r"[^a-z0-9]", "", str(c).lower())
-                if req == "Product Name" and cn in ["productname", "product", "itemname", "item", "description", "particulars", "name"]:
+                if req == "Product Name" and any(k in cn for k in ["productname", "product", "itemname", "item", "description", "particular", "name"]):
                     matching_cols.append(c)
-                elif req == "Order Quantity" and cn in ["orderquantity", "orderqty", "quantity", "qty", "units"]:
+                elif req == "Order Quantity" and any(k in cn for k in ["orderquantity", "orderqty", "quantity", "qty", "units"]):
                     matching_cols.append(c)
-                elif req == "Transfer Price" and cn in ["transferprice", "price", "unitprice", "rate", "tp"]:
+                elif req == "Transfer Price" and (any(k in cn for k in ["transferprice", "unitprice", "tp"]) or cn in ["price", "rate", "cost"]):
                     matching_cols.append(c)
-                elif req == "Transfer Price*Order QTY" and cn in ["transferpriceorderqty", "totalprice", "totalamount", "amount", "total"]:
+                elif req == "Transfer Price*Order QTY" and any(k in cn for k in ["transferpriceorderqty", "totalprice", "totalamount", "amount", "total"]):
                     matching_cols.append(c)
         if matching_cols:
             # Pick column that has the most non-null values to avoid empty duplicate columns
             best_col = max(matching_cols, key=lambda c: raw_df[c].notna().sum())
             df[req] = raw_df[best_col]
 
+    # Convert numeric fields safely
+    if "Transfer Price" in df.columns:
+        df["Transfer Price"] = df["Transfer Price"].apply(_clean_float)
+    if "Order Quantity" in df.columns:
+        df["Order Quantity"] = df["Order Quantity"].apply(lambda v: _clean_int(v, default=0))
+
     # If Total Price is missing, compute it
-    if "Transfer Price*Order QTY" not in df.columns and "Transfer Price" in df.columns and "Order Quantity" in df.columns:
-        df["Transfer Price*Order QTY"] = pd.to_numeric(df["Transfer Price"], errors="coerce") * pd.to_numeric(df["Order Quantity"], errors="coerce")
+    if "Transfer Price" in df.columns and "Order Quantity" in df.columns:
+        if "Transfer Price*Order QTY" not in df.columns or df["Transfer Price*Order QTY"].isna().all():
+            df["Transfer Price*Order QTY"] = df["Transfer Price"] * df["Order Quantity"]
+        else:
+            df["Transfer Price*Order QTY"] = df["Transfer Price*Order QTY"].apply(_clean_float)
 
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -598,6 +641,10 @@ def match_items(
     unmatched: nothing plausible found at all.
     """
     matched, needs_review, unmatched = [], [], []
+    if not invoice_items:
+        return matched, needs_review, unmatched
+    if vendor_df is None or vendor_df.empty:
+        return matched, needs_review, invoice_items
     
     from sentence_transformers import util  # lazy import — avoids transformers load at startup
     model = get_embedding_model()
@@ -722,23 +769,25 @@ def match_items(
 
 
 def _build_match(inv: dict, vrow: pd.Series, score: float, source: str) -> dict:
-    invoice_unit_price = inv["unit_net_price"]
-    transfer_price = float(vrow["Transfer Price"])
-    qty_compared = min(inv["qty"], int(vrow["Order Quantity"])) if pd.notna(vrow["Order Quantity"]) else inv["qty"]
+    invoice_unit_price = _clean_float(inv.get("unit_net_price", 0.0))
+    transfer_price = _clean_float(vrow.get("Transfer Price", 0.0))
+    inv_qty = _clean_int(inv.get("qty", 1), default=1)
+    v_qty = _clean_int(vrow.get("Order Quantity", 0), default=0)
+    qty_compared = min(inv_qty, v_qty) if v_qty > 0 else inv_qty
     savings_per_unit = transfer_price - invoice_unit_price
     return {
         "source_invoice": inv.get("source_invoice", ""),
         "invoice_description": inv["description"],
-        "invoice_pack": inv["pack"],
-        "invoice_qty": inv["qty"],
-        "invoice_unit_price": invoice_unit_price,
+        "invoice_pack": inv.get("pack", ""),
+        "invoice_qty": inv_qty,
+        "invoice_unit_price": round(invoice_unit_price, 2),
         "vendor_product_name": vrow["Product Name"],
-        "vendor_order_qty": vrow["Order Quantity"],
-        "transfer_price": transfer_price,
+        "vendor_order_qty": v_qty,
+        "transfer_price": round(transfer_price, 2),
         "qty_compared": qty_compared,
         "savings_per_unit": round(savings_per_unit, 2),
         "total_savings": round(savings_per_unit * qty_compared, 2),
-        "match_score": score,
+        "match_score": round(score, 1),
         "match_source": source,
     }
 
