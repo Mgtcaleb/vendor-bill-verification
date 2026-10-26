@@ -336,8 +336,8 @@ def parse_invoice_tables(pdf_path: str) -> list[dict]:
                             "brand_tag": _extract_brand(desc),
                             "source_invoice": Path(pdf_path).name,
                         })
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Error in parse_invoice_tables: {e}")
     return items
 
 

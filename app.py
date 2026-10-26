@@ -15,7 +15,9 @@ if "HF_TOKEN" not in os.environ:
     except Exception:
         pass
 
-# Import core logic from the existing script
+import importlib
+import invoice_savings_compare
+importlib.reload(invoice_savings_compare)
 from invoice_savings_compare import (
     parse_invoice,
     load_vendor_sheet,
@@ -125,6 +127,10 @@ if sidebar_proc_btn or main_proc_btn:
                     
                     try:
                         invoice_items = parse_invoice(inv_path)
+                        if not invoice_items and inv_path.lower().endswith(".pdf"):
+                            from invoice_savings_compare import parse_invoice_tables
+                            invoice_items = parse_invoice_tables(inv_path)
+
                         debug_info[inv_file.name] = len(invoice_items)
                         
                         if len(invoice_items) == 0:
@@ -140,9 +146,11 @@ if sidebar_proc_btn or main_proc_btn:
                             except Exception:
                                 pass
                         else:
-                            st.success(f"✅ Parsed {len(invoice_items)} line items from `{inv_file.name}`.")
+                            st.success(f"✅ Successfully extracted {len(invoice_items)} line items from `{inv_file.name}`.")
                     except Exception as e:
+                        import traceback
                         st.error(f"❌ Error parsing `{inv_file.name}`: {e}")
+                        st.code(traceback.format_exc())
                         continue
                         
                     matched, needs_review, unmatched = match_items(
