@@ -1,35 +1,4 @@
 import sys
-from importlib.abc import MetaPathFinder, Loader
-from importlib.machinery import ModuleSpec
-from unittest.mock import MagicMock
-
-# Intercept and mock torchvision imports so transformers/streamlit watcher never fails with ModuleNotFoundError
-class _TorchvisionFinder(MetaPathFinder, Loader):
-    def find_spec(self, fullname, path, target=None):
-        if fullname == "torchvision" or fullname.startswith("torchvision."):
-            return ModuleSpec(fullname, self, is_package=True)
-        return None
-
-    def create_module(self, spec):
-        mod = MagicMock()
-        mod.__version__ = "0.0.0"
-        mod.__path__ = []
-        mod.__file__ = "<mock>"
-        return mod
-
-    def exec_module(self, module):
-        pass
-
-if not any(isinstance(f, _TorchvisionFinder) for f in sys.meta_path):
-    sys.meta_path.insert(0, _TorchvisionFinder())
-
-try:
-    import transformers.utils.import_utils as _iu
-    _iu._torchvision_available = False
-except Exception:
-    pass
-
-
 import streamlit as st
 import pandas as pd
 import pdfplumber
