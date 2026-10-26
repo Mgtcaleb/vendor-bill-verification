@@ -247,25 +247,36 @@ def extract_text_from_image(image_path: str) -> str:
 def parse_invoice_text(full_text: str, source_name: str = "") -> list[dict]:
     """Extract line items from formatted text (from PDF or PaddleOCR)."""
     items = []
-    for raw_line in full_text.splitlines():
+    lines = full_text.splitlines()
+    for idx, raw_line in enumerate(lines):
         m = re.match(r"^\s*(\d+)[\.\)]?\s+(.*)$", raw_line)
-        if not m:
-            continue
-        sno, rest = m.groups()
+        if m:
+            sno, rest = m.groups()
+        else:
+            sno = str(idx + 1)
+            rest = raw_line.strip()
+
         rest = _clean_watermark_noise(rest)
 
         # Normalize commas in decimals (e.g., 120,00 -> 120.00 from occasional OCR noise)
         rest_normalized = re.sub(r"(\d+),(\d{2})\b", r"\1.\2", rest)
 
-        # last 6 decimals on the line = MRP, Rate, DIS%, BatchDisc%, an
-        # always-zero column (CST/unused on this invoice layout), NetAmount
+        # decimals on the line: MRP, Rate, DIS%, CST/Batch%, NetAmount
         decimals = list(re.finditer(r"\d+\.\d{2}", rest_normalized))
-        if len(decimals) < 6:
-            continue  # not a genuine item line (e.g. a totals line)
-        last6 = decimals[-6:]
-        mrp, rate, dis_pct, batch_pct, _zero_col, net_amt = (float(x.group()) for x in last6)
+        if len(decimals) < 4:
+            continue  # not an item line with prices
 
-        head = rest_normalized[: last6[0].start()].strip()
+        if len(decimals) >= 6:
+            last_decimals = decimals[-6:]
+            mrp, rate, dis_pct, batch_pct, _zero_col, net_amt = (float(x.group()) for x in last_decimals)
+        elif len(decimals) == 5:
+            last_decimals = decimals[-5:]
+            mrp, rate, dis_pct, _, net_amt = (float(x.group()) for x in last_decimals)
+        else:
+            last_decimals = decimals[-4:]
+            mrp, rate, dis_pct, net_amt = (float(x.group()) for x in last_decimals)
+
+        head = rest_normalized[: last_decimals[0].start()].strip()
 
         # qty is the first integer token in head
         qm = re.match(r"^(\d+)\s+(.*)$", head)
@@ -287,11 +298,14 @@ def parse_invoice_text(full_text: str, source_name: str = "") -> list[dict]:
             pack = ""
             description = head.strip()
 
+        if not description:
+            continue
+
         unit_net_price = round(net_amt / qty, 4) if qty else net_amt
 
         items.append(
             {
-                "sno": int(sno),
+                "sno": int(sno) if sno.isdigit() else idx + 1,
                 "qty": qty,
                 "pack": pack,
                 "description": description,
@@ -378,10 +392,36 @@ def _normalize_name(name: str) -> str:
 def load_vendor_sheet(path: str) -> pd.DataFrame:
     engine = "xlrd" if str(path).lower().endswith(".xls") else "openpyxl"
     df = pd.read_excel(path, engine=engine)
+    
+    # Strip whitespace from column names
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Map common column aliases flexibly
+    col_map = {}
+    for c in df.columns:
+        c_norm = re.sub(r"[^a-zA-Z0-9]", "", c.lower())
+        if c_norm in {"productname", "product", "itemname", "item", "description", "items"}:
+            col_map[c] = "Product Name"
+        elif c_norm in {"orderquantity", "orderqty", "quantity", "qty", "units", "orderedqty"}:
+            col_map[c] = "Order Quantity"
+        elif c_norm in {"transferprice", "price", "unitprice", "rate", "tp", "ourprice"}:
+            col_map[c] = "Transfer Price"
+        elif c_norm in {"transferpriceorderqty", "totalprice", "totalamount", "amount", "total"}:
+            col_map[c] = "Transfer Price*Order QTY"
+
+    df = df.rename(columns=col_map)
+
+    # If Total Price column is missing but we have Qty and Price, compute it automatically
+    if "Transfer Price*Order QTY" not in df.columns and "Transfer Price" in df.columns and "Order Quantity" in df.columns:
+        df["Transfer Price*Order QTY"] = pd.to_numeric(df["Transfer Price"], errors="coerce") * pd.to_numeric(df["Order Quantity"], errors="coerce")
+
     required = ["Product Name", "Order Quantity", "Transfer Price", "Transfer Price*Order QTY"]
     missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(f"Vendor sheet is missing expected column(s): {missing}")
+        raise ValueError(
+            f"Vendor sheet is missing expected column(s): {missing}. "
+            f"Found columns: {list(df.columns)}"
+        )
     df = df.dropna(subset=["Product Name"]).copy()
     df["norm_name"] = df["Product Name"].apply(_normalize_name)
     df["brand_tag"] = df["Product Name"].apply(_extract_brand)
